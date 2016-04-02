@@ -1,0 +1,43 @@
+package transfer;
+
+message transfer {
+  optional send_init    sned_init    = 1;
+  optional send_partial send_partial = 2;
+  optional send_finish  send_finish  = 3;
+  
+  optional recv_init    recv_init    = 4;
+  optional recv_partial recv_partial = 5;
+  repeated send_partial recv_status  = 6;
+  optional recv_finish  recv_finish  = 7;
+}
+
+message send_init {
+  required uint32 total = 1;
+  required uint32 block = 2;
+  required uint32 cnt   = 3;
+  required string name  = 4;
+}
+
+message send_partial {
+  required uint32 sequence = 1;
+  required uint32 size     = 2;
+  optional bytes  checksum = 3;
+  required uint32 start    = 4;
+  required uint32 end      = 5;
+}
+
+message send_finish {
+  optional bytes checksum = 1;
+}
+
+message recv_init {
+  optional string name = 1;
+}
+
+message recv_partial {
+  required uint32 sequence = 1;
+  required uint32 status   = 2;
+}
+
+message recv_finish {
+}
