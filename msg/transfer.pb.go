@@ -17,7 +17,7 @@ It has these top-level messages:
 	RecvPartial
 	RecvFinish
 */
-package transfer
+package msg
 
 import proto "github.com/golang/protobuf/proto"
 import fmt "fmt"
