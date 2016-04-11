@@ -1,5 +1,6 @@
 package kcp
 
+
 type Queue struct {
   prev *Queue
   next *Queue
@@ -21,6 +22,32 @@ func (q *Queue) init() {
 
 func (q *Queue) Len() uint32 {
   return *q.val.(*uint32)
+}
+
+func (q *Queue) Before(pos *Queue, val interface{}) {
+  entry := new(Queue)
+  entry.val = val
+  q.BeforeNode(pos, entry)
+}
+
+func (q *Queue) BeforeNode(pos, node *Queue) {
+  prev := pos.prev
+  prev.next, pos.prev = node, node
+  node.prev, node.next = prev, pos
+  *q.val.(*uint32)++
+}
+
+func (q *Queue) After(pos *Queue, val interface{}) {
+  entry := new(Queue)
+  entry.val = val
+  q.AfterNode(pos, entry)
+}
+
+func (q *Queue) AfterNode(pos, node *Queue) {
+  next := pos.next
+  pos.next, next.prev = node, node
+  node.prev, node.next = pos, next
+  *q.val.(*uint32)++
 }
 
 func (q *Queue) PushNode(node *Queue) {
@@ -52,6 +79,10 @@ func (q *Queue) Insert(val interface{}) {
 }
 
 func (q *Queue) Pop() *Queue {
+  if q.Len() == 0 {
+    return nil
+  }
+  
   entry := q.next
   q.next = entry.next
   entry.next.prev = q
@@ -63,6 +94,10 @@ func (q *Queue) Pop() *Queue {
 }
 
 func (q *Queue) Delete(entry *Queue) {
+  if q == entry {
+    return
+  }
+  
   entry.next.prev, entry.prev.next = entry.prev, entry.next
   *q.val.(*uint32)--
 }

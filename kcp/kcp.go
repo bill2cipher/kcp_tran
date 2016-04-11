@@ -11,17 +11,15 @@ const (
   KCP_RTO_MIN = 100
   KCP_RTO_DEF = 200
   KCP_RTO_MAX = 60000
-  
   KCP_WND_SND = 32
   KCP_WND_RCV = 32
-  
   KCP_MTU_DEF = 1400
   KCP_ACK_FAST = 3
   KCP_INTERVAL = 100
   KCP_OVERHEAD = 4 * 8
   KCP_DEADLINK = 10
   KCP_THRESH_INIT = 2
-  kCP_THRESH_MIN = 2  
+  KCP_THRESH_MIN = 2
 )
 
 const (
@@ -79,10 +77,16 @@ func timediff(later, earlier uint32) int {
   return int(later) - int(earlier)
 }
 
+func NewKCP(conv uint32, writer io.Writer) *KCP {
+  kcp := new(KCP)
+  kcp.init(conv, writer)
+  return kcp
+}
+
 func (kcp *KCP) init(conv uint32, writer io.Writer) {
   kcp.conv = conv
   kcp.writer = writer
-  kcp.snd_wnd, kcp.rcv_wnd, kcp.rmt_wnd = KCP_WND_SND, KCP_WND_RCV, KCP_WND_RCV
+  kcp.snd_wnd, kcp.rcv_wnd, kcp.rmt_wnd, kcp.cwnd = KCP_WND_SND, KCP_WND_RCV, KCP_WND_RCV, 1
   kcp.mtu = KCP_MTU_DEF
   kcp.mss = KCP_MTU_DEF - KCP_OVERHEAD
   
@@ -92,18 +96,24 @@ func (kcp *KCP) init(conv uint32, writer io.Writer) {
   
   kcp.rx_rto, kcp.rx_minrto = KCP_RTO_DEF, KCP_RTO_MIN
   kcp.interval, kcp.ts_flush = KCP_INTERVAL, KCP_INTERVAL
+  kcp.ssthresh = KCP_THRESH_INIT
   kcp.dead_link = KCP_DEADLINK
+  kcp.state = 1
 }
 
-func (kcp *KCP) output(data []byte) (int, error) {
+func (kcp *KCP) output(data []byte) error {
   if len(data) == 0 {
-    return 0, nil
+    return nil
   }
-  return kcp.writer.Write(data)
+  cnt, err := kcp.writer.Write(data)
+  if cnt != len(data) {
+    return errors.New("less data sent")
+  }
+  return err
 }
 
 func (kcp *KCP) receive(peek bool) ([]byte, error) {
-  peeksize, err := kcp.peeksize()
+  _, err := kcp.peeksize()
   recover := false
   
   if err != nil {
@@ -154,7 +164,7 @@ func (kcp *KCP) peeksize() (uint32, error) {
   if kcp.rcv_queue.Len() == 0 {
     return 0, errors.New("empty queue")
   }
-  
+
   seg := kcp.rcv_queue.next.val.(*Segment)
   if seg.frg == 0 {
     return seg.len, nil
@@ -162,7 +172,7 @@ func (kcp *KCP) peeksize() (uint32, error) {
     return 0, errors.New("rcv data not enough")
   }
   
-  var rslt uint32 = 0
+  var rslt uint32
   for entry := kcp.rcv_queue.next; entry != kcp.rcv_queue; entry = entry.next {
     rslt += entry.val.(*Segment).len
     if entry.val.(*Segment).frg == 0 {
@@ -282,59 +292,375 @@ func (kcp *KCP) ack_get(pos uint32) (uint32, uint32) {
 
 func (kcp *KCP) parse_data(seg *Segment) {
   if seg.sn < kcp.rcv_nxt || seg.sn >= kcp.rcv_wnd + kcp.rcv_nxt  {
-    break
+    return
   }
   
-  for entry := kcp.rcv_buf.prev; entry != kcp.rcv_buf; entry = entry.prev {
+  entry, repeat := kcp.rcv_buf.prev, false
+  for ; entry != kcp.rcv_buf; entry = entry.prev {
     if entry.val.(*Segment).sn > seg.sn {
       continue
     }
     if entry.val.(*Segment).sn == seg.sn {
+      repeat = true
       break
     }
-    entry.Insert(seg)
+    break
   }
   
-  // move continuation data from rcv_buf into rcv_queue
-  for entry := kcp.rcv_buf.next; entry != kcp.rcv_buf; {
+  if !repeat {
+    kcp.rcv_buf.After(entry, seg)
+  }
+  
+  for entry = kcp.rcv_buf.next; entry != kcp.rcv_buf; {
     seg := entry.val.(*Segment)
     next := entry.next
     if seg.sn != kcp.rcv_nxt {
       break
     }
     
-    kcp.rcv_queue.PushNode(entry)
     kcp.rcv_buf.Delete(entry)
+    kcp.rcv_queue.PushNode(entry)
     kcp.rcv_nxt++
+    entry = next
   }
 }
-
 
 // rcv read received data and parse
 func (kcp *KCP) input(data []byte) error {
   if data == nil || len(data) < KCP_OVERHEAD {
     return errors.New("empty data")
   }
-  
+  var una uint32
   for true {
     seg, data, err := Decode(data)
     if err != nil {
       return err
     }
-    
+    una = seg.una
     kcp.rmt_wnd = seg.wnd
     kcp.parse_una(seg.una)
     kcp.shrink_buf()
     
     switch seg.cmd {
+      case KCP_CMD_ACK:
+        if seg.ts < kcp.current {
+          kcp.update_ack(kcp.current - seg.ts)
+        }
+        kcp.parse_ack(seg.sn)
+        kcp.shrink_buf()
       case KCP_CMD_PUSH:
-        if seg.sn > kcp.rcv_wnd + kcp.rcv_nxt
-        
+        if seg.sn > kcp.rcv_wnd + kcp.rcv_nxt {
+            return errors.New("rcv buffer full")
+        }
+        kcp.parse_data(seg)
+        kcp.ack_push(seg.sn, seg.ts)
+      case KCP_CMD_WASK:
+        kcp.probe |= KCP_ASK_TELL
+      case KCP_CMD_WINS:
+      default:
+        return errors.New("unknown data command")
     }
     
     if len(data) < KCP_OVERHEAD {
       break
     }
   }
+  
+  if kcp.snd_una > una && kcp.cwnd < kcp.rmt_wnd {
+    if kcp.cwnd < kcp.ssthresh {
+      kcp.cwnd++
+      kcp.incr = kcp.mss
+    } else {
+      if kcp.incr < kcp.mss {
+        kcp.incr = kcp.mss
+      }
+      kcp.incr += kcp.mss * kcp.mss / kcp.incr + kcp.mss / 16
+      if (kcp.cwnd + 1) * kcp.mss < kcp.incr {
+        kcp.cwnd++
+      }
+    }
+    if kcp.cwnd > kcp.rmt_wnd {
+      kcp.cwnd = kcp.rmt_wnd
+      kcp.incr = kcp.mss * kcp.rmt_wnd
+    }
+  }
   return nil
+}
+
+func (kcp *KCP) wnd_unused() uint32 {
+  if kcp.rcv_queue.Len() < kcp.rcv_wnd {
+    return kcp.rcv_wnd - kcp.rcv_queue.Len()
+  }
+  return 0
+}
+
+func (kcp *KCP) flush() error {
+  if kcp.updated == 0 {
+    return errors.New("updated has not been called")
+  }
+  
+  var pos, current uint32 = 0, kcp.current
+  seg := NewSegment(kcp)
+  seg.cmd = KCP_CMD_ACK
+  seg.una = kcp.rcv_nxt
+  seg.wnd = kcp.wnd_unused()
+  
+  for i := 0; i < len(kcp.acklist); i += 2 {
+    seg.sn, seg.ts = kcp.ack_get(uint32(i))
+    if pos + KCP_OVERHEAD > kcp.mtu {
+      if err := kcp.output(kcp.buffer[:pos]); err != nil {
+        return err
+      }
+      pos = 0
+    }
+    seg.Encode(kcp.buffer[pos:])
+    pos += KCP_OVERHEAD
+  }
+  kcp.acklist = []uint32{}
+  
+  if kcp.rmt_wnd == 0 {
+    if kcp.probe_wait == 0 {
+      kcp.probe_wait = KCP_PROBE_INIT
+      kcp.ts_probe = current + kcp.probe_wait
+    } else if current > kcp.ts_probe {
+      kcp.probe_wait = max(kcp.probe_wait, KCP_PROBE_INIT)
+      kcp.probe_wait += kcp.probe_wait / 2
+      kcp.probe_wait = min(kcp.probe_wait, KCP_PROBE_LIMIT)
+      kcp.probe |= KCP_ASK_SEND
+    }
+  } else {
+    kcp.ts_probe = 0
+    kcp.probe_wait = 0
+  }
+  
+  if kcp.probe & KCP_ASK_TELL == 1 {
+    seg.cmd = KCP_CMD_WINS
+    if pos + KCP_OVERHEAD > kcp.mtu {
+      if err := kcp.output(kcp.buffer[:pos]); err != nil {
+        return err
+      }
+      pos = 0
+    }
+    seg.Encode(kcp.buffer[pos:])
+    pos += KCP_OVERHEAD
+  }
+  
+  if kcp.probe & KCP_ASK_SEND == 1 {
+    seg.cmd = KCP_CMD_WASK
+    if pos + KCP_OVERHEAD > kcp.mtu {
+      if err := kcp.output(kcp.buffer[:pos]); err != nil {
+        return err
+      }
+      pos = 0
+    }
+    seg.Encode(kcp.buffer[pos:])
+    pos += KCP_OVERHEAD
+  }
+  kcp.probe = 0
+  
+  cwnd := min(kcp.snd_wnd, kcp.rmt_wnd)
+  if kcp.nocwnd == 0 {
+    cwnd = min(kcp.cwnd, cwnd)
+  }
+  
+  for cwnd + kcp.snd_una > kcp.snd_nxt {
+    entry := kcp.snd_queue.Pop()
+    if entry == nil {
+      break
+    }
+    seg := entry.val.(*Segment)
+    seg.sn = kcp.snd_nxt
+    seg.cmd = KCP_CMD_PUSH
+    seg.rto = kcp.rx_rto
+    seg.wnd = kcp.wnd_unused()
+    seg.resendts = current
+    seg.ts = current
+    seg.una = kcp.rcv_nxt
+    kcp.snd_nxt++
+    
+    kcp.snd_buf.PushNode(entry)
+  }
+  
+  var resent, rtomin uint32
+  if kcp.faskresend > 0 {
+    resent = kcp.faskresend
+  } else {
+    resent = 0xffffffff
+  }
+  
+  if kcp.nodelay == 0 {
+    rtomin = kcp.rx_rto >> 3
+  } else {
+    rtomin = 0
+  }
+  
+  send, lost, change := false, false, false
+  for entry := kcp.snd_buf.next; entry != kcp.snd_buf; entry = entry.next {
+    seg := entry.val.(*Segment)
+    send = false
+    if seg.xmit == 0 {
+      seg.xmit++
+      seg.rto = kcp.rx_rto
+      seg.resendts = current + seg.rto + rtomin
+      send = true
+    } else if seg.resendts < current {
+      seg.xmit++
+      if kcp.nodelay == 0 {
+        seg.rto += kcp.rx_rto
+      } else {
+        seg.rto += kcp.rx_rto / 2
+      }
+      seg.resendts = current + seg.rto
+      lost, send = true, true
+    } else if seg.fastack >= kcp.faskresend {
+      seg.xmit++
+      seg.fastack = 0
+      seg.resendts = current + seg.rto
+      send, change = true, true
+    }
+    
+    if !send {
+      continue
+    }
+    
+    if pos + seg.len + KCP_OVERHEAD > kcp.mtu {
+      if err := kcp.output(kcp.buffer[:pos]); err != nil {
+        return err
+      }
+      pos = 0
+    }
+    seg.wnd = kcp.wnd_unused()
+    seg.una = kcp.rcv_nxt
+    seg.ts = current
+    seg.Encode(kcp.buffer[pos:])
+    pos += KCP_OVERHEAD + seg.len
+    
+    if seg.xmit >= kcp.dead_link {
+      kcp.state = 0
+    }
+  }
+  
+  // flushing remaining data
+  if pos != 0 {
+    if err := kcp.output(kcp.buffer[:pos]); err != nil {
+      return err
+    }
+    pos = 0
+  }
+  
+  // calculating congestion window
+  if change {
+    inflight := kcp.snd_nxt - kcp.snd_una
+    kcp.ssthresh = max(inflight / 2, KCP_THRESH_MIN)
+    kcp.cwnd = kcp.ssthresh + resent
+    kcp.incr = kcp.cwnd * kcp.mss
+  } else if lost {
+    kcp.ssthresh = max(kcp.cwnd / 2, KCP_THRESH_MIN)
+    kcp.cwnd = 1
+    kcp.incr = kcp.mss
+  }
+  
+  if kcp.cwnd < 1 {
+    kcp.cwnd = 1
+    kcp.incr = kcp.mss
+  }
+  return nil
+}
+
+func (kcp *KCP) update(current uint32) error {
+  kcp.current = current
+  if kcp.updated == 0 {
+    kcp.updated = 1
+    kcp.ts_flush = kcp.current + kcp.interval
+  }
+  
+  slap := timediff(kcp.current, kcp.ts_flush)
+  if slap > 10000 || slap < -10000 {
+    kcp.ts_flush = kcp.current
+    slap = 0
+  }
+  
+  kcp.ts_flush += kcp.interval
+  if kcp.ts_flush < kcp.current {
+    kcp.ts_flush = kcp.current + kcp.interval
+  }
+  return kcp.flush()
+}
+
+func (kcp *KCP) check(current uint32) uint32 {
+  if kcp.updated == 0 {
+    return current
+  }
+  
+  slap := timediff(current, kcp.ts_flush)
+  if slap > 10000 || slap < 0 {
+    return current
+  }
+  
+  var recent uint32
+  for entry := kcp.snd_buf.next; entry != kcp.snd_buf; entry = entry.next {
+    seg := entry.val.(*Segment)
+    if seg.resendts < current {
+      return current
+    }
+    
+    if recent == 0 {
+      recent = seg.resendts
+    } else if recent < seg.resendts {
+      recent = seg.resendts
+    }
+  }
+  rslt := min(recent, kcp.ts_flush)
+  return min(rslt, current + kcp.interval)
+}
+
+func (kcp *KCP) setmtu(mtu uint32) error {
+  if mtu < KCP_OVERHEAD || mtu < 50 {
+    return errors.New("mtu too small")
+  }
+  
+  buffer := make([]byte, mtu)
+  kcp.mtu = mtu
+  kcp.mss = mtu - KCP_OVERHEAD
+  kcp.buffer = buffer
+  return nil
+}
+
+func (kcp *KCP) set_interval(interval uint32) {
+  if interval > 5000 {
+    interval = 5000
+  } else if interval < 10 {
+    interval = 10
+  }
+  kcp.interval = interval
+}
+
+func (kcp *KCP) set_nodelay(nodelay, interval, resend, nc uint32) {
+  kcp.set_interval(interval)
+  if nodelay >= 0 {
+    kcp.nodelay = nodelay
+    if nodelay == 0 {
+      kcp.rx_minrto = KCP_RTO_MIN
+    } else {
+      kcp.rx_minrto = KCP_RTO_NDL
+    }
+  }
+  
+  if resend >= 0 {
+    kcp.faskresend = resend
+  }
+  
+  if nc >= 0 {
+    kcp.nocwnd = nc
+  }
+}
+
+func (kcp *KCP) wnd_size(rcv_wnd, snd_wnd uint32) {
+  if rcv_wnd > 0 {
+    kcp.rcv_wnd = rcv_wnd
+  }
+  
+  if snd_wnd > 0 {
+    kcp.snd_wnd = snd_wnd
+  }
 }

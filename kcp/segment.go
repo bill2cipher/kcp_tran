@@ -1,7 +1,6 @@
 package kcp
 
 import (
-  "bytes"
   "errors"
   "encoding/binary"
 )
@@ -32,37 +31,35 @@ func (seg *Segment) init(kcp *KCP) {
   seg.conv = kcp.conv
 }
 
-func (seg *Segment) Encode() []byte {
-  var buffer bytes.Buffer
-  var store = make([]byte, 4)
+func (seg *Segment) Encode(buffer []byte) {
+  binary.LittleEndian.PutUint32(buffer, seg.conv)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.conv)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.sn)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.sn)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.frg)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.frg)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.cmd)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.cmd)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.una)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.una)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.wnd)
+  buffer = buffer[4:]
   
-  binary.LittleEndian.PutUint32(store, seg.wnd)
-  buffer.Write(store)
-  
-  binary.LittleEndian.PutUint32(store, seg.ts)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, seg.ts)
+  buffer = buffer[4:]
   
   dlen := uint32(len(seg.data))
-  binary.LittleEndian.PutUint32(store, dlen)
-  buffer.Write(store)
+  binary.LittleEndian.PutUint32(buffer, dlen)
+  buffer = buffer[4:]
 
-  buffer.Write(seg.data)
-  return buffer.Bytes()
+  for i := 0; i < len(seg.data); i++ {
+    buffer[i] = seg.data[i]
+  }
 }
 
 func Decode(data []byte) (*Segment, []byte, error) {
@@ -97,5 +94,5 @@ func Decode(data []byte) (*Segment, []byte, error) {
   } else {
     seg.data = data[:dlen]
   }
-  return seg, data[KCP_OVERHEAD + dlen:], nil
+  return seg, data[dlen:], nil
 }
