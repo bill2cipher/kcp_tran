@@ -53,6 +53,7 @@ type KCP struct {
   faskresend uint32
   nocwnd uint32
   writer io.Writer
+  debug bool
 }
 
 func min(a, b uint32) uint32 {
@@ -128,19 +129,18 @@ func (kcp *KCP) receive(peek bool) ([]byte, error) {
   var buffer bytes.Buffer
   for entry := kcp.rcv_queue.next; entry != kcp.rcv_queue; {
     seg := entry.val.(*Segment)
-    entry = entry.next
+    next := entry.next
     buffer.Write(seg.data)
-    if peek {
-      continue
+    if !peek {
+      kcp.rcv_queue.Delete(entry)
     }
-    
-    kcp.rcv_queue.Delete(entry)
+    entry = next
     if seg.frg == 0 {
       break
     }
   } 
   
-  // Move data from snd_buf into snd_queue
+  // Move data from rcv_buf into rcv_queue
   for kcp.rcv_buf.Len() > 0 {
     entry := kcp.rcv_buf.next
     seg := entry.val.(*Segment)
@@ -194,7 +194,6 @@ func (kcp *KCP) send(data []byte) error {
   } else if count == 0 {
     count = 1
   }
-  
   for i := uint32(0); i < count; i++ {
     seg := NewSegment(kcp)
     if i == count - 1 {
@@ -248,7 +247,7 @@ func (kcp *KCP) shrink_buf() {
 // rcv ack from remote side
 func (kcp *KCP) parse_ack(sn uint32) {
   // ack for old pkg or future pkg is invalid
-  if sn < kcp.snd_una || sn <= kcp.snd_nxt {
+  if sn < kcp.snd_una || sn >= kcp.snd_nxt {
     return
   }
   
@@ -257,17 +256,18 @@ func (kcp *KCP) parse_ack(sn uint32) {
     seg := entry.val.(*Segment)
     if seg.sn < sn {
       seg.fastack++
-    } else {
+      continue
+    } else if seg.sn == sn {
       kcp.snd_buf.Delete(entry)
-      break 
     }
+    break
   }
 }
 
 // rcv una from remote side
 func (kcp *KCP) parse_una(una uint32) {
   // una for old pkg or future pkg is invalid
-  if una < kcp.snd_una || una >= kcp.snd_nxt {
+  if una < kcp.snd_una {
     return
   }
   
@@ -330,13 +330,13 @@ func (kcp *KCP) input(data []byte) error {
   if data == nil || len(data) < KCP_OVERHEAD {
     return errors.New("empty data")
   }
-  var una uint32
+  una := kcp.snd_una
   for true {
-    seg, data, err := Decode(data)
+    seg, rslt, err := Decode(data)
+    data = rslt
     if err != nil {
       return err
     }
-    una = seg.una
     kcp.rmt_wnd = seg.wnd
     kcp.parse_una(seg.una)
     kcp.shrink_buf()
@@ -350,7 +350,7 @@ func (kcp *KCP) input(data []byte) error {
         kcp.shrink_buf()
       case KCP_CMD_PUSH:
         if seg.sn > kcp.rcv_wnd + kcp.rcv_nxt {
-            return errors.New("rcv buffer full")
+          return errors.New("rcv buffer full")
         }
         kcp.parse_data(seg)
         kcp.ack_push(seg.sn, seg.ts)
@@ -365,7 +365,6 @@ func (kcp *KCP) input(data []byte) error {
       break
     }
   }
-  
   if kcp.snd_una > una && kcp.cwnd < kcp.rmt_wnd {
     if kcp.cwnd < kcp.ssthresh {
       kcp.cwnd++
@@ -408,9 +407,7 @@ func (kcp *KCP) flush() error {
   for i := 0; i < len(kcp.acklist); i += 2 {
     seg.sn, seg.ts = kcp.ack_get(uint32(i))
     if pos + KCP_OVERHEAD > kcp.mtu {
-      if err := kcp.output(kcp.buffer[:pos]); err != nil {
-        return err
-      }
+      kcp.output(kcp.buffer[:pos])
       pos = 0
     }
     seg.Encode(kcp.buffer[pos:])
@@ -436,9 +433,7 @@ func (kcp *KCP) flush() error {
   if kcp.probe & KCP_ASK_TELL == 1 {
     seg.cmd = KCP_CMD_WINS
     if pos + KCP_OVERHEAD > kcp.mtu {
-      if err := kcp.output(kcp.buffer[:pos]); err != nil {
-        return err
-      }
+       kcp.output(kcp.buffer[:pos])
       pos = 0
     }
     seg.Encode(kcp.buffer[pos:])
@@ -448,9 +443,7 @@ func (kcp *KCP) flush() error {
   if kcp.probe & KCP_ASK_SEND == 1 {
     seg.cmd = KCP_CMD_WASK
     if pos + KCP_OVERHEAD > kcp.mtu {
-      if err := kcp.output(kcp.buffer[:pos]); err != nil {
-        return err
-      }
+      kcp.output(kcp.buffer[:pos])
       pos = 0
     }
     seg.Encode(kcp.buffer[pos:])
@@ -512,7 +505,7 @@ func (kcp *KCP) flush() error {
       }
       seg.resendts = current + seg.rto
       lost, send = true, true
-    } else if seg.fastack >= kcp.faskresend {
+    } else if seg.fastack >= resent {
       seg.xmit++
       seg.fastack = 0
       seg.resendts = current + seg.rto
@@ -524,9 +517,7 @@ func (kcp *KCP) flush() error {
     }
     
     if pos + seg.len + KCP_OVERHEAD > kcp.mtu {
-      if err := kcp.output(kcp.buffer[:pos]); err != nil {
-        return err
-      }
+      kcp.output(kcp.buffer[:pos])
       pos = 0
     }
     seg.wnd = kcp.wnd_unused()
@@ -534,7 +525,6 @@ func (kcp *KCP) flush() error {
     seg.ts = current
     seg.Encode(kcp.buffer[pos:])
     pos += KCP_OVERHEAD + seg.len
-    
     if seg.xmit >= kcp.dead_link {
       kcp.state = 0
     }
@@ -542,9 +532,7 @@ func (kcp *KCP) flush() error {
   
   // flushing remaining data
   if pos != 0 {
-    if err := kcp.output(kcp.buffer[:pos]); err != nil {
-      return err
-    }
+    kcp.output(kcp.buffer[:pos])
     pos = 0
   }
   
@@ -578,6 +566,10 @@ func (kcp *KCP) update(current uint32) error {
   if slap > 10000 || slap < -10000 {
     kcp.ts_flush = kcp.current
     slap = 0
+  }
+  
+  if slap < 0 {
+    return nil
   }
   
   kcp.ts_flush += kcp.interval

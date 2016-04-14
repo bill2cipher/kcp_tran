@@ -3,6 +3,8 @@ package kcp
 import (
   "errors"
   "encoding/binary"
+	"bytes"
+	"fmt"
 )
 
 type Segment struct {
@@ -86,13 +88,26 @@ func Decode(data []byte) (*Segment, []byte, error) {
   seg.ts = binary.LittleEndian.Uint32(data)
   data = data[4:]
   
-  dlen := binary.LittleEndian.Uint32(data)
+  seg.len = binary.LittleEndian.Uint32(data)
   data = data[4:]
   
-  if uint32(len(data)) < dlen {
-    return nil, nil, errors.New("content format error: data len too large")
+  if uint32(len(data)) < seg.len {
+    msg := fmt.Sprintf("content format error: data len too large %d/%d", len(data), seg.len)
+    return nil, nil, errors.New(msg)
   } else {
-    seg.data = data[:dlen]
+    seg.data = data[:seg.len]
   }
-  return seg, data[dlen:], nil
+  return seg, data[seg.len:], nil
+}
+
+
+func (seg *Segment) dump() string {
+  var buffer bytes.Buffer
+  buffer.WriteString(fmt.Sprintf("cmd : %d\n", seg.cmd))
+  buffer.WriteString(fmt.Sprintf("una : %d\n", seg.una))
+  buffer.WriteString(fmt.Sprintf("sn  : %d\n", seg.sn))
+  buffer.WriteString(fmt.Sprintf("frg : %d\n", seg.frg))
+  buffer.WriteString(fmt.Sprintf("wnd : %d\n", seg.wnd))
+  buffer.WriteString(fmt.Sprintf("len: %d\n", seg.len))
+  return buffer.String()
 }
