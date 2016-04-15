@@ -8,10 +8,7 @@ import (
 	"encoding/binary"
 )
 
-func clock() uint32 {
-  Now := time.Now().UnixNano()
-  return uint32(Now / 1000000) & 0xFFFFFFFF
-}
+
 
 type DelayPkg struct {
   ts uint32
