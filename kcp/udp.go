@@ -46,24 +46,31 @@ type KDP struct {
   arrived chan bool
 }
 
-func NewKDP(conv uint32, udp *net.UDPConn) *KDP {
+func NewKDP(conv uint32, udp *net.UDPConn, raddr *net.UDPAddr) *KDP {
   k := new(KDP)
-  k.init(conv, udp)
+  k.init(conv, udp, raddr)
   return k
 }
 
-func (k *KDP) init(conv uint32, udp *net.UDPConn) {
+func (k *KDP) init(conv uint32, udp *net.UDPConn, raddr *net.UDPAddr) {
   k.udp = udp
-  k.kcp = NewKCP(conv, udp)
+  k.raddr = raddr
+  k.kcp = NewKCP(conv, k.output)
   k.event = make(chan *cmd)
   k.arrived = make(chan bool)
+  k.kcp.set_nodelay(1, 10, 2, 1)
   go k.demon()
+}
+
+func (k *KDP) output(data []byte) (int, error) {
+  return k.udp.WriteToUDP(data, k.raddr)
 }
 
 func (k *KDP) Read(store []byte) (int, error) {
   if len(store) == 0 {
     return 0, errors.New("store size less than 1")
   }
+  
   for !k.close {
     if len(k.buff) > 0 {
       cnt := copy(store, k.buff)
@@ -142,7 +149,9 @@ func (k *KDP) Close() {
   k.close = true
   action := new(cmd)
   action.cmd = KDP_CLOSE
+  action.pipe = make(chan *reply)
   k.event <- action
+  <- action.pipe
 }
 
 func (k *KDP) input(data []byte) error {
@@ -172,7 +181,7 @@ func (k *KDP) input(data []byte) error {
 }
 
 func (k *KDP) execute(action *cmd) {
-  go recover()
+  defer recover()
   switch action.cmd {
   case KDP_READ:
     k.execute_read(action)
@@ -190,6 +199,7 @@ func (k *KDP) execute(action *cmd) {
 func (k *KDP) execute_close(action *cmd) {
   close(k.event)
   close(k.arrived)
+  go snd_rslt(nil, action.pipe)
 }
 
 func (k *KDP) execute_read(action *cmd) {
@@ -243,7 +253,7 @@ func (k *KDP) snd_rslt(rslt *reply, pipe chan *reply) {
     return
   }
   select {
-    case <- time.After(1 * time.Millisecond):
+    case <- time.After(1 * time.Second):
     case pipe <- rslt:
   }
 }
@@ -252,7 +262,7 @@ func (k *KDP) snd_rslt(rslt *reply, pipe chan *reply) {
 func (k *KDP) demon() {
   trigger := time.NewTicker(KDP_INTERVAL)
   var update_time uint32
-  for {
+  for !k.close {
     select {
     case <- trigger.C:
       current := clock()
@@ -262,9 +272,6 @@ func (k *KDP) demon() {
       }
     case action := <- k.event:
       k.execute(action)
-      if k.close {
-        return
-      }
     }
   }
 }
@@ -276,16 +283,18 @@ type Client struct {
   close bool
 }
 
-func Dial(raddr string) (*Client, error) {
+func Dial(raddr string, id uint32) (*Client, error) {
   client := new(Client)
-  if remote, err := net.ResolveUDPAddr("udp4", raddr); err != nil {
+  if local, err := net.ResolveUDPAddr("udp4", "0.0.0.0:0"); err != nil {
     return nil, err
-  } else if conn, err := net.DialUDP("udp4", nil, remote); err != nil {
+  } else if remote, err := net.ResolveUDPAddr("udp4", raddr); err != nil {
+    return nil, err 
+  } else if conn, err := net.ListenUDP("udp4", local); err != nil {
     defer conn.Close()
     return nil, err
   } else {
     client.udp = conn
-    client.pipe = NewKDP(1, conn)
+    client.pipe = NewKDP(id, conn, remote)
   }
   go client.demon()
   return client, nil
@@ -295,7 +304,7 @@ func Dial(raddr string) (*Client, error) {
 func (client *Client) demon() {
   buffer := make([]byte, 4096)
   for !client.close {
-    client.udp.SetReadDeadline(time.Now().Add(1 * time.Second))
+    client.udp.SetReadDeadline(time.Now().Add(10 * time.Second))
     cnt, err := client.udp.Read(buffer)
     if cnt == 0 || err != nil {
       continue
@@ -329,24 +338,33 @@ func (client *Client) Close() {
 type Server struct {
   udp   *net.UDPConn
   pipes map[string]*KDP
-
+  id    uint32
   event  chan *cmd
   accept chan *KDP
   close  bool
 }
 
-func Listen(laddr string) (*Server, error) {
+func Listen(laddr string, id uint32) (*Server, error) {
   server := new(Server)
-  if local, err := net.ResolveUDPAddr("udp4", SERVER_ADDR); err != nil {
+  server.init()
+  if local, err := net.ResolveUDPAddr("udp4", laddr); err != nil {
     return nil, err
   } else if conn, err := net.ListenUDP("udp4", local); err != nil {
     defer conn.Close()
     return nil, err
   } else {
     server.udp = conn
+    server.id = id
   }
   go server.demon()
   return server, nil
+}
+
+func (server *Server) init() {
+  server.pipes = make(map[string]*KDP)
+  server.event = make(chan *cmd)
+  server.accept = make(chan *KDP, 1024)
+  server.close = false
 }
 
 func (server *Server) Accept() (*KDP, error) {
@@ -358,6 +376,14 @@ func (server *Server) Accept() (*KDP, error) {
     }
   }
   return nil, errors.New("server closed")
+}
+
+func (server *Server) Close() {
+  action := new(cmd)
+  action.cmd = KDP_CLOSE
+  action.pipe = make(chan *reply)
+  server.event <- action
+  <- action.pipe
 }
 
 func (server *Server) Break(kdp *KDP) {
@@ -374,34 +400,32 @@ func (server *Server) Break(kdp *KDP) {
 // Waiting data from client
 func (server *Server) demon() {
   buffer := make([]byte, 2048)
-  for {
+  for !server.close {
     server.udp.SetReadDeadline(time.Now().Add(time.Second))
-    cnt, saddr, err := server.udp.ReadFromUDP(buffer)
+    cnt, raddr, err := server.udp.ReadFromUDP(buffer)
     if cnt == 0 || err != nil {
-      continue
-    }
-    data := make([]byte, cnt)
-    copy(data, buffer)
-    if pipe, ok := server.pipes[saddr.String()]; !ok {
-      pipe = NewKDP(1, server.udp)
-      server.pipes[saddr.String()] = pipe
-      pipe.input(data)
     } else {
-      pipe.input(data)
+      data := make([]byte, cnt)
+      copy(data, buffer)
+      if pipe, ok := server.pipes[raddr.String()]; !ok {
+        pipe = NewKDP(server.id, server.udp, raddr)
+        server.pipes[raddr.String()] = pipe
+        pipe.input(data)
+        server.accept <- pipe
+      } else {
+        pipe.input(data)
+      }
     }
     select {
     case action := <- server.event:
       server.execute(action)
-      if action.cmd == KDP_CLOSE {
-        return
-      }
     default:
     }
   }
 }
 
 func (server *Server) execute(action *cmd) {
-  go recover()
+  defer recover()
   switch action.cmd {
   case KDP_CLOSE:
     server.exec_close(action)
@@ -413,8 +437,14 @@ func (server *Server) execute(action *cmd) {
 }
 
 func (server *Server) exec_close(action *cmd) {
+  for _, v := range server.pipes {
+    v.Close()
+  }
+  server.close = true
   close(server.event)
   close(server.accept)
+  server.udp.Close()
+  go snd_rslt(nil, action.pipe)
 }
 
 func (server *Server) exec_break(action *cmd) {

@@ -1,7 +1,6 @@
 package kcp
 
 import (
-  "io"
   "bytes"
   "errors"
 )
@@ -52,7 +51,7 @@ type KCP struct {
   buffer []byte
   faskresend uint32
   nocwnd uint32
-  writer io.Writer
+  writer func([]byte) (int, error)
   debug bool
 }
 
@@ -78,13 +77,13 @@ func timediff(later, earlier uint32) int {
   return int(later) - int(earlier)
 }
 
-func NewKCP(conv uint32, writer io.Writer) *KCP {
+func NewKCP(conv uint32, writer func([]byte)(int, error)) *KCP {
   kcp := new(KCP)
   kcp.init(conv, writer)
   return kcp
 }
 
-func (kcp *KCP) init(conv uint32, writer io.Writer) {
+func (kcp *KCP) init(conv uint32, writer func([]byte)(int, error)) {
   kcp.conv = conv
   kcp.writer = writer
   kcp.snd_wnd, kcp.rcv_wnd, kcp.rmt_wnd, kcp.cwnd = KCP_WND_SND, KCP_WND_RCV, KCP_WND_RCV, 1
@@ -106,7 +105,7 @@ func (kcp *KCP) output(data []byte) error {
   if len(data) == 0 {
     return nil
   }
-  cnt, err := kcp.writer.Write(data)
+  cnt, err := kcp.writer(data)
   if cnt != len(data) {
     return errors.New("less data sent")
   }

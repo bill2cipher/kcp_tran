@@ -1,6 +1,10 @@
 package transfer
 
 import (
+  "os"
+)
+
+import (
   "github.com/jellybean4/kcp_tran/kcp"
 )
 
@@ -12,25 +16,14 @@ type Sender struct {
   queue  []*Block `desc:"where read but not sent block is stored"`
   send   []*Block `desc:"where sent but not verified block is stored"`
   recvd  []*Block `desc:"where recvd and verified block is stored"`
-  socket *kcp.KcpSocket `desc:"kcp socket used to recv/send data"`
+  socket *kcp.Client `desc:"kcp socket used to recv/send data"`
   name   string `desc:"file being read"`
   file   *os.File `desc:"file struct used to read data"`
 }
 
-func NewSender(socket *kcp.KcpSocket) (*Sender, error) {
-  sender := new(Sender)
-  if err := sender.init(socket); err != nil {
-    return nil, err
-  }
-  return sender, nil
+func Dial(laddr string) {  
 }
 
-func (s *Sender) init(socket *kcp.KcpSocket) error {
-  s.sockt = socket
-  s.id = 0
-  return nil
-}
-
-func (s *Sender) Router() error {
-  return nil
+func (s *Sender) init() {
+  
 }

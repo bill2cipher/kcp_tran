@@ -1,7 +1,7 @@
 package transfer;
 
 message transfer {
-  optional send_init    sned_init    = 1;
+  optional send_init    send_init    = 1;
   optional send_partial send_partial = 2;
   optional send_finish  send_finish  = 3;
   
@@ -24,6 +24,7 @@ message send_partial {
   optional bytes  checksum = 3;
   required uint32 start    = 4;
   required uint32 end      = 5;
+  optional bytes  content  = 6;
 }
 
 message send_finish {
