@@ -3,7 +3,9 @@ package transfer
 import (
   "os"
   "log"
+  "bytes"
   "errors"
+  "sync"
   "crypto/md5"
   "encoding/binary"
 )
@@ -26,43 +28,93 @@ type EndPoint struct {
   total   uint32 `desc:"total size of the tranfered data"`
   block   uint32 `desc:"block size of the split data"`
   cnt     uint32 `desc:"how many blocks will be transfered"`
-  rcv_buf []*msg.SendPartial `desc:"where recvd but not verified block is stored"`
-  recvd   []*msg.SendPartial `desc:"where recvd and verified block is stored"`
+  rcved   []*msg.SendPartial `desc:"where recvd and verified block is stored"`
   snd_buf []*msg.SendPartial `desc:"where data need to be sent"`
   sent    []*msg.SendPartial `desc:"where data sent but not ack"`
   sock    *kcp.KDP `desc:"kcp socket used to recv/send data"`
   name    string `desc:"file being written"`
   file    *os.File `desc:"file struct used to write/read data"`
   close   bool `desc:"if this end point is closed"`
+  arrived chan bool
+  mutex   *sync.Mutex
 }
 
 func NewEndPoint(id uint32, sock *kcp.KDP) *EndPoint {
   end := new(EndPoint)
+  end.init(id, sock)
+  go end.demon()
+  go end.flush()
   return end
 }
 
 func (end *EndPoint) init(id uint32, sock *kcp.KDP) {
   end.id = id
   end.sock = sock
+  end.arrived = make(chan bool)
+  end.mutex = new(sync.Mutex)
+}
+
+func (end *EndPoint) flush() {
+  for !end.close {
+    select{
+    case <- end.arrived:
+    default:
+      continue
+    }
+    var partial []*msg.SendPartial
+    end.mutex.Lock()
+    partial = end.rcved
+    end.rcved = nil
+    end.mutex.Unlock()
+    if partial == nil {
+      continue
+    } else if err := end.write(partial); err != nil {
+      end.mutex.Lock()
+      end.rcved = append(end.rcved)
+      end.mutex.Unlock()
+    }
+  }
+}
+
+func (end *EndPoint) write(partial *msg.SendPartial) error {
+  if _, err := end.file.Seek(int64(*partial.Start), os.SEEK_SET); err != nil {
+    return err
+  }
+  if cnt, err := end.file.Write(partial.Content); err != nil {
+    return err
+  } else if uint32(cnt) < *partial.Size {
+    return errors.New("write partial size not enough")
+  }
+  return nil
 }
 
 func (end *EndPoint) demon() {
-  store := make([]byte, 4)
-  trans := new(msg.Transfer)
+  store := make([]byte, 8)
   for !end.close {
-    if dlen, err := end.readLen(store); err != nil {
+    if dlen, code, err := end.readLen(store); err != nil {
       log.Printf("read msg len failed %s", err.Error())
       continue
     } else if data, err := end.readMsg(dlen); err != nil {
       log.Printf("read msg failed %d %s", dlen, err.Error())
       continue
-    } else if err := proto.Unmarshal(data, trans); err != nil {
-      log.Printf("decode proto msg failed %s", err.Error())
-      continue
-    } else {
+    } else if code == 1 {
+      trans := new(msg.Transfer)
+      if err := proto.Unmarshal(data, trans); err != nil {
+        continue
+      }
       end.execute(trans)
+    } else {
+      trans := new(msg.TransferRp)
+      if err := proto.Unmarshal(data, trans); err != nil {
+        continue
+      }
+      end.ending(trans)
     }
   }
+}
+
+func (end *EndPoint) ending(trans *msg.TransferRp) {
+
 }
 
 func (end *EndPoint) execute(trans *msg.Transfer) error {
@@ -75,12 +127,6 @@ func (end *EndPoint) execute(trans *msg.Transfer) error {
     return end.sendFinish(trans.SendFinish)
   case trans.RecvInit != nil:
     return end.recvInit(trans.RecvInit)
-  case trans.RecvPartial != nil:
-    return end.recvPartial(trans.RecvPartial)
-  case trans.RecvStatus != nil:
-    return end.recvStatus(trans.RecvStatus)
-  case trans.RecvFinish != nil:
-    return end.recvFinish(trans.RecvFinish)
   default:
     return errors.New("unknown command")
   }
@@ -104,15 +150,25 @@ func (end *EndPoint) sendPartial(partial *msg.SendPartial) error {
   block := partial
   if calc := CheckSum(partial.Content); BinaryCompare(calc, partial.Checksum) != 0 {
     return errors.New("partial check failed")
-  } else {
-    return nil
   }
+  end.rcv_buf = append(end.rcv_buf, block)
+  select {
+  case end.arrived <- true:
+  default:
+  }
+  return nil
 }
 
 func (end *EndPoint) sendFinish(finish *msg.SendFinish) error {
-  for i := 0; i < len(end.rcv_buf); i++ {
-    end.rcv_buf[i]
+  var buffer bytes.Buffer
+  for i := 0; i < len(end.rcved); i++ {
+    buffer.Write(rcved[i].Checksum)
   }
+  if calc := CheckSum(buffer.Bytes()); BinaryCompare(calc, finish.Checksum) != 0 {
+    return errors.New("snd finish check failed")
+  }
+  end.file.Close()
+  return nil
 }
 
 func (end *EndPoint) recvInit(init *msg.RecvInit) error {
@@ -132,26 +188,14 @@ func (end *EndPoint) recvInit(init *msg.RecvInit) error {
   }
 }
 
-func (end *EndPoint) recvPartial(partial *msg.RecvPartial) error {
-  
-}
 
-func (end *EndPoint) recvStatus(status []*msg.SendPartial) error {
-  
-}
-
-func (end *EndPoint) recvFinish(finish *msg.RecvFinish) error {
-  
-}
-
-
-
-func (end *EndPoint) readLen(store []byte) (uint32, error) {
+func (end *EndPoint) readLen(store []byte) (uint32, uint32, error) {
   if err := end.readData(store); err != nil {
-    return 0, err
+    return 0, 0, err
   } else {
     dlen := binary.LittleEndian.Uint32(store)
-    return dlen, nil
+    code := binary.LittleEndian.Uint32(store[4:])
+    return dlen, code, nil
   }
 }
 

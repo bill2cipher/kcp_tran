@@ -41,6 +41,7 @@ type KDP struct {
   buff []byte
   raddr *net.UDPAddr
   update bool
+  updated chan bool
   close bool
   event chan *cmd
   arrived chan bool
@@ -58,6 +59,7 @@ func (k *KDP) init(conv uint32, udp *net.UDPConn, raddr *net.UDPAddr) {
   k.kcp = NewKCP(conv, k.output)
   k.event = make(chan *cmd)
   k.arrived = make(chan bool)
+  k.updated = make(chan bool)
   k.kcp.set_nodelay(1, 10, 2, 1)
   go k.demon()
 }
@@ -112,10 +114,9 @@ func (k *KDP) read_once() ([]byte, error) {
   rslt := <- flow
   if rslt.err != nil {
     return nil, rslt.err
-  } else {
-    data := rslt.rslt[0].([]byte)
-    return data, nil
-  }
+  } 
+  data := rslt.rslt[0].([]byte)
+  return data, nil
 }
 
 func (k *KDP) Write(data []byte) error {
@@ -125,20 +126,29 @@ func (k *KDP) Write(data []byte) error {
   } else if k.close {
     return errors.New("kdp closed")
   }
-  
-  flow := make(chan *reply)
-  defer close(flow)
-  action := new(cmd)
-  action.cmd = KDP_WRITE
-  action.pipe = flow
-  action.args = []interface{}{data}
-  k.event <- action
-  rslt := <- flow
-  if rslt.err != nil {
-    return rslt.err
-  } else {
+  for true {
+    select {
+    case <-k.updated:
+    case <-time.After(time.Second):
+    }
+    
+    if k.kcp.snd_buf.Len() > 0 {
+      continue
+    }
+    flow := make(chan *reply)
+    defer close(flow)
+    action := new(cmd)
+    action.cmd = KDP_WRITE
+    action.pipe = flow
+    action.args = []interface{}{data}
+    k.event <- action
+    rslt := <- flow
+    if rslt.err != nil {
+      return rslt.err
+    }
     return nil
   }
+  return nil
 }
 
 func (k *KDP) Close() {
@@ -269,6 +279,10 @@ func (k *KDP) demon() {
       if k.update || update_time <= current {
         k.kcp.update(current)
         update_time = k.kcp.check(current)
+        select {
+        case k.updated <- true:
+        default:
+        }
       }
     case action := <- k.event:
       k.execute(action)
