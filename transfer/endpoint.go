@@ -19,13 +19,10 @@ import (
   "github.com/jellybean4/kcp_tran/msg"
 )
 
-const (
-  BLOCK_SIZE = 1024 * 1024 * 4
-)
-
-
-
-
+type Pipe interface {
+  Write(data []byte) error
+  Read(store []byte) (int, error)
+}
 
 type EndPoint struct {
   id      uint32 `desc:"identifier of this EndPoint"`
@@ -36,42 +33,19 @@ type EndPoint struct {
   rcved   []*msg.SendPartial `desc:"where recvd and verified block is stored"`
   snd_buf []*msg.SendPartial `desc:"where data need to be sent"`
   sent    []*msg.SendPartial `desc:"where data sent but not ack"`
-  sock    *kcp.KDP `desc:"kcp socket used to recv/send data"`
+  sock    Pipe `desc:"kcp socket used to recv/send data"`
   name    string `desc:"file being written"`
-  file   *os.File `desc:"file struct used to write data"`
-  close   bool `desc:"if this end point is closed"`
-  arrived chan bool
-  flow    chan []byte
-  mutex   *sync.Mutex
-  sockflow chan []byte
 }
 
-func NewEndPoint(id uint32, sock *kcp.KDP) *EndPoint {
+func NewEndPoint(id uint32, sock Pipe) *EndPoint {
   end := new(EndPoint)
   end.init(id, sock)
-  go end.demon()
-  go end.sockout()
   return end
 }
 
-
-func (end *EndPoint) init(id uint32, sock *kcp.KDP) {
+func (end *EndPoint) init(id uint32, sock Pipe) {
   end.id = id
   end.sock = sock
-  end.arrived = make(chan bool)
-  end.mutex = new(sync.Mutex)
-  end.flow = make(chan []byte, 5)
-}
-
-func (end *EndPoint) ReadPartial(pos, size uint32) (uint32, error) {
-  buffer := make([]byte, size)
-  end.file
-    cnt, err := end.rfile.Read(buffer)
-    if err != nil {
-      return
-    }
-    end.flow <- buffer[:cnt]
-  }
 }
 
 func (end *EndPoint) sockout() {
