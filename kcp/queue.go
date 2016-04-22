@@ -1,6 +1,5 @@
 package kcp
 
-
 type Queue struct {
   prev *Queue
   next *Queue
@@ -93,6 +92,14 @@ func (q *Queue) Pop() *Queue {
   return entry
 }
 
+func (q *Queue) PopVal() interface{} {
+  if entry := q.Pop(); entry == nil {
+    return nil
+  } else {
+    return entry.val
+  }
+}
+
 func (q *Queue) Delete(entry *Queue) {
   if q == entry {
     return
@@ -101,3 +108,33 @@ func (q *Queue) Delete(entry *Queue) {
   entry.next.prev, entry.prev.next = entry.prev, entry.next
   *q.val.(*uint32)--
 }
+
+
+type Iterator struct {
+  head *Queue
+  cur  *Queue
+}
+
+func NewIterator(q *Queue) *Iterator {
+  iter := new(Iterator)
+  iter.head = q
+  iter.cur = iter.head
+  return iter
+} 
+
+func (iter *Iterator) Valid() bool {
+  return iter.cur != iter.head
+}
+
+func (iter *Iterator) Next() {
+  iter.cur = iter.cur.next
+}
+
+func (iter *Iterator) Value() interface{} {
+  return iter.cur.val
+}
+
+func (iter *Iterator) SeekToFirst() {
+  iter.cur = iter.head.next
+}
+

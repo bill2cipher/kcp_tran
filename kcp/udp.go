@@ -68,6 +68,12 @@ func (k *KDP) output(data []byte) (int, error) {
   return k.udp.WriteToUDP(data, k.raddr)
 }
 
+func (k *KDP) Sync() {
+  for k.kcp.snd_buf.Len() + k.kcp.snd_queue.Len() > 0 {
+  <-time.After(500 * time.Millisecond)
+  }
+}
+
 func (k *KDP) Read(store []byte) (int, error) {
   if len(store) == 0 {
     return 0, errors.New("store size less than 1")
@@ -131,8 +137,7 @@ func (k *KDP) Write(data []byte) error {
     case <-k.updated:
     case <-time.After(time.Second):
     }
-    
-    if k.kcp.snd_buf.Len() > 0 {
+    if k.kcp.snd_queue.Len() > 0 {
       continue
     }
     flow := make(chan *reply)
@@ -268,7 +273,6 @@ func (k *KDP) snd_rslt(rslt *reply, pipe chan *reply) {
   }
 }
 
-
 func (k *KDP) demon() {
   trigger := time.NewTicker(KDP_INTERVAL)
   var update_time uint32
@@ -347,6 +351,10 @@ func (client *Client) Close() {
   client.close = true
   client.pipe.Close()
   client.udp.Close()
+}
+
+func (client *Client) Sync() {
+  client.pipe.Sync()
 }
 
 type Server struct {

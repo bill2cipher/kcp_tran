@@ -3,6 +3,7 @@ package kcp
 import (
   "bytes"
   "errors"
+	"fmt"
 )
 
 const (
@@ -188,8 +189,9 @@ func (kcp *KCP) send(data []byte) error {
   dlen := uint32(len(data))
   
   count := (dlen + kcp.mss - 1) / kcp.mss
-  if count > 255 {
-    return errors.New("data size too large")
+  if count >= KCP_WND_RCV {
+    mesg := fmt.Sprintf("data size too large %d/%d", count, kcp.rmt_wnd)
+    return errors.New(mesg)
   } else if count == 0 {
     count = 1
   }
@@ -207,7 +209,6 @@ func (kcp *KCP) send(data []byte) error {
   }
   return nil
 }
-
 
 // calculate rtt and rto
 func (kcp *KCP) update_ack(rtt uint32) {
@@ -396,7 +397,6 @@ func (kcp *KCP) flush() error {
   if kcp.updated == 0 {
     return errors.New("updated has not been called")
   }
-  
   var pos, current uint32 = 0, kcp.current
   seg := NewSegment(kcp)
   seg.cmd = KCP_CMD_ACK
@@ -472,7 +472,6 @@ func (kcp *KCP) flush() error {
     
     kcp.snd_buf.PushNode(entry)
   }
-  
   var resent, rtomin uint32
   if kcp.faskresend > 0 {
     resent = kcp.faskresend

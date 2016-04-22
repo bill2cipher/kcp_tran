@@ -1,19 +1,11 @@
-package transfer;
+package msg;
 
 message transfer {
   optional send_init    send_init    = 1;
-  optional send_partial send_partial = 2;
-  optional send_finish  send_finish  = 3;
-
-  optional recv_init    recv_init    = 4;
-}
-
-message transfer_rp {
-  optional send_init_rp    send_init_rp = 1;
-  optional send_partial_rp send_partial_rp = 2;
-  optional send_finish_rp  send_finish_rp = 3;
-
-  optional recv_init_rp    recv_init_rp = 4;
+  optional recv_init    recv_init    = 2;
+  optional send_partial send_partial = 3;
+  optional ask_partial  ask_partial  = 4;
+  optional error        status       = 5;
 }
 
 message send_init {
@@ -23,36 +15,23 @@ message send_init {
   required string name  = 4;
 }
 
-message send_init_rp {
-  required uint32 status = 1;
+message recv_init {
+  required string name  = 1;
+  required uint32 total = 2;
+  required uint32 block = 3;
+  required uint32 cnt   = 4;
 }
 
 message send_partial {
-  required uint32 sequence = 1;
-  required uint32 size     = 2;
-  optional bytes  checksum = 3;
-  required uint32 start    = 4;
-  required uint32 end      = 5;
-  optional bytes  content  = 6;
+  required uint32 index    = 1;
+  required bytes  data     = 2;
+  required bytes  checksum = 3;
 }
 
-message send_partial_rp {
-  required uint32 sequence = 1;
-  required uint32 status   = 2;
+message ask_partial {
+  repeated uint32 index = 1;
 }
 
-message send_finish {
-  optional bytes checksum = 1;
-}
-
-message send_finish_rp {
-  required uint32 status = 1;
-}
-
-message recv_init {
-  optional string name = 1;
-}
-
-message recv_init_rp {
-  required uint32 status = 1;
+message error {
+  required uint32 code = 1;
 }
