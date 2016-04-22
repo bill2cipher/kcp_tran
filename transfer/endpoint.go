@@ -114,7 +114,9 @@ func (end *EndPoint) AskIndex(size int) []uint32 {
     end.ask_idx = end.ask_idx[size:]
     return rslt
   } else {
-    return end.ask_idx
+    rslt := end.ask_idx
+    end.ask_idx = nil
+    return rslt
   }
 }
 

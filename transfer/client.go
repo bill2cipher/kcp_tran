@@ -63,9 +63,8 @@ func SendFileProc(point *EndPoint, info os.FileInfo, file *os.File) error {
       ask_idx = append(ask_idx, mesg.AskPartial.Index...)
     }
     for _, idx := range ask_idx {
-      if _, err := file.Seek(int64(idx), os.SEEK_CUR); err != nil {
-        return err
-      } else if cnt, err := file.Read(buffer); err != nil {
+      pos := idx * point.block
+      if cnt, err := ReadFile(file, int(pos), buffer); err != nil {
         return err
       } else if idx < point.cnt - 1 && uint32(cnt) < point.block {
         err_msg := fmt.Sprintf("read file content too small %d/%d %d/%d", idx, point.cnt, cnt, point.block)
@@ -134,12 +133,23 @@ func RecvFile(name string, dest string, raddr string) error {
 
 func RecvFileProc(point *EndPoint, file, cfile *os.File, fill bool) error {
   signal, first := make(chan error), true
-  var index uint32
+  var (
+    index uint32
+    idxes []uint32
+    count int
+  )
+  
   if fill {
     FillFile(file, point.total)
   }
-  for len(point.ask_idx) != 0 {
-    idxes := point.AskIndex(2)
+  
+  for len(point.ask_idx) > 0 || count > 0 {
+    if first {
+      idxes = point.AskIndex(5)
+    } else {
+      idxes = point.AskIndex(1)
+    }
+    count += len(idxes)
     if err := point.AskPartial(idxes); err != nil {
       return err
     } else if mesg, err := point.ReadMessageTimeout(TIMEOUT); err != nil {
@@ -155,6 +165,7 @@ func RecvFileProc(point *EndPoint, file, cfile *os.File, fill bool) error {
     } else {
       partial := mesg.SendPartial
       pos, data := *partial.Index * point.block, partial.Data
+      count--
       go FlushFile(file, pos, data, signal)
     }
     log.Printf("recv progress %d/%d", index, point.cnt)
@@ -165,9 +176,8 @@ func RecvFileProc(point *EndPoint, file, cfile *os.File, fill bool) error {
 }
 
 func FlushFile(file *os.File, pos uint32, data []byte, signal chan error) {
-  if _, err := file.Seek(int64(pos), os.SEEK_CUR); err != nil {
-    signal <- err
-  } else if cnt, err := file.Write(data); err != nil {
+  log.Printf("writing offset %d", int64(pos))
+  if cnt, err := file.WriteAt(data, int64(pos)); err != nil {
     signal <- err
   } else if cnt < len(data) {
     signal <- errors.New("write data too small")
@@ -212,3 +222,4 @@ func ChooseName(name string) (string, bool) {
   }
   return name, true
 }
+

@@ -133,13 +133,13 @@ func (k *KDP) Write(data []byte) error {
     return errors.New("kdp closed")
   }
   for true {
-    select {
-    case <-k.updated:
-    case <-time.After(time.Second):
-    }
-    if k.kcp.snd_queue.Len() > 0 {
-      continue
-    }
+    //select {
+    //case <-k.updated:
+    //case <-time.After(time.Second):
+    //}
+    //if k.kcp.snd_queue.Len() > 0 {
+    //  continue
+    //}
     flow := make(chan *reply)
     defer close(flow)
     action := new(cmd)

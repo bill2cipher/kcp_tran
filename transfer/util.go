@@ -2,6 +2,7 @@ package transfer
 
 import (
   "os"
+	"io"
   "crypto/md5"
   "encoding/binary"
 )
@@ -53,6 +54,20 @@ func FillFile(file *os.File, total uint32) error {
     }
   }
   return nil
+}
+
+func ReadFile(file *os.File, pos int, buffer []byte) (int, error) {
+  var size int
+  for size < len(buffer) {
+    if cnt, err := file.ReadAt(buffer[size:], int64(pos + size)); err != nil && err != io.EOF {
+      return 0, err
+    } else if err == io.EOF {
+      return cnt + size, nil
+    } else {
+      size += cnt
+    }
+  }
+  return size, nil
 }
 
 
