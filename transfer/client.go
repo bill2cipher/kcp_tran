@@ -17,7 +17,7 @@ import (
 )
 
 const (
-  TIMEOUT    = 10 * time.Second
+  TIMEOUT    = 30 * time.Second
   BLOCK_SIZE = 1024 * 16
   ASK_WND = 5
 )

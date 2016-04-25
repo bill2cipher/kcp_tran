@@ -229,6 +229,7 @@ func (end *EndPoint) ReadMessageTimeout(timeout time.Duration) (*msg.Transfer, e
 
 
 func read_proc(sock Pipe, signal chan []byte) {
+  defer recover()
   var rslt []byte
   header := make([]byte, 4)
   if dlen, err := ReadHeader(header, sock); err != nil {
