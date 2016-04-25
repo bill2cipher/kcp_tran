@@ -64,16 +64,17 @@ func (s *server) proc_recv(init *msg.RecvInit, sock Pipe) error {
 }
 
 func (s *server) proc_send(init *msg.SendInit, sock Pipe) error {
-  flags := os.O_RDWR | os.O_CREATE
-  name := s.dest + path.Base(*init.Name)
-  conf := ConfigName(name)
   var (
     cfile, file *os.File
     err  error
     fill bool
     point *EndPoint
   )
-
+  flags := os.O_RDWR | os.O_CREATE
+  name := s.dest + path.Base(*init.Name)
+  name, fill = ChooseName(name)
+  conf := ConfigName(name)
+  
   defer CloseFiles(cfile, file)
   if cfile, err = os.OpenFile(conf, flags, 0600); err != nil {
     log.Printf("server open config file error %s", err.Error())
