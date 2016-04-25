@@ -36,23 +36,25 @@ func (s *server) process(sock Pipe) {
   point := NewEndPoint(1, sock)
   mesg, err := point.ReadMessageTimeout(TIMEOUT)
   if err != nil {
-    log.Printf("read message failed %s", err.Error())
+    log.Printf("server read message failed %s", err.Error())
     return
   } 
 
   if mesg.SendInit != nil {
     err := s.proc_send(mesg.SendInit, sock)
-    log.Printf("proc send rslt %v", err)
+    log.Printf("server proc send rslt %v", err)
   } else if mesg.RecvInit != nil {
     err := s.proc_recv(mesg.RecvInit, sock)
-    log.Printf("proc recv rslt %v", err)
+    log.Printf("server proc recv rslt %v", err)
   }
 }
 
 func (s *server) proc_recv(init *msg.RecvInit, sock Pipe) error {
   if info, err := os.Stat(*init.Name); err != nil {
+    log.Printf("server check file %s info error %s", *init.Name, err.Error())
     return err
   } else if file, err := os.OpenFile(*init.Name, os.O_RDONLY, 0); err != nil {
+    log.Printf("server open recved file %s error %s", *init.Name, err.Error())
     return err
   } else {
     point := NewEndPoint(1, sock)
@@ -62,27 +64,38 @@ func (s *server) proc_recv(init *msg.RecvInit, sock Pipe) error {
 }
 
 func (s *server) proc_send(init *msg.SendInit, sock Pipe) error {
-  flags := os.O_WRONLY | os.O_CREATE
+  flags := os.O_RDWR | os.O_CREATE
   name := s.dest + path.Base(*init.Name)
-  conf := name + ".download"
-  var cfile, file *os.File
-  var err error
-  defer func() {
-    if cfile != nil {
-      cfile.Close()
-    }
-    if file != nil {
-      file.Close()
-    }
-  }()
+  conf := ConfigName(name)
+  var (
+    cfile, file *os.File
+    err  error
+    fill bool
+    point *EndPoint
+  )
+
+  defer CloseFiles(cfile, file)
   if cfile, err = os.OpenFile(conf, flags, 0600); err != nil {
+    log.Printf("server open config file error %s", err.Error())
     return err
   } else if file, err = os.OpenFile(name, flags, 0600); err != nil {
+    log.Printf("server open data file error %s", err.Error())
     return err
-  } else {
-    point := NewEndPoint(1, sock)
-    point.SetInfo(*init.Total, *init.Block, *init.Cnt)
-    return RecvFileProc(point, file, cfile, true)
   }
+  
+  point = NewEndPoint(1, sock)
+  if fill, err = LoadConfig(cfile, point); err != nil {
+    log.Printf("server load config error %s", err.Error())
+    return err
+  }
+  
+  if fill, err = ParseInitMesg(init, point); err != nil {
+    log.Printf("server parse init message failed %s", err.Error())
+    return err
+  } else if err = WriteConfig(cfile, point); err != nil {
+    log.Printf("server write config failed %s", err.Error())
+    return err
+  }
+  return RecvFileProc(point, file, cfile, fill)
 }
 

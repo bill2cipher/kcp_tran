@@ -48,6 +48,7 @@ func (end *EndPoint) init(id uint32, sock Pipe) {
 func (end *EndPoint) Encode() []byte {
   var buffer bytes.Buffer
   var store = make([]byte, 4)
+  log.Printf("encode %d %d %d", end.total, end.block, end.cnt)
   binary.LittleEndian.PutUint32(store, end.total)
   buffer.Write(store)
   
@@ -86,6 +87,7 @@ func (end *EndPoint) Decode(data []byte) error {
   data = data[4:]
   
   temp := make([]bool, end.cnt)
+  log.Printf(" %d %d %d", end.total, end.block, end.cnt)
   for len(data) > 4 {
     val := binary.LittleEndian.Uint32(data)
     temp[val] = true

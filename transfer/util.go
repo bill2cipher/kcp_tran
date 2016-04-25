@@ -120,3 +120,7 @@ func CloseFiles(files... *os.File) {
     f.Close()
   }
 }
+
+func ConfigName(name string) string {
+  return name + ".download"
+}
